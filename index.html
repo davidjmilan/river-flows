@@ -17,6 +17,7 @@
     --good: #5fd38d;
     --warn: #e0b341;
     --bad: #e06c5e;
+    --temp: #e0915e;
   }
   * { box-sizing: border-box; }
   body {
@@ -60,6 +61,7 @@
   .rivermeta { color: var(--muted); font-size: 0.76rem; margin-top: 2px; }
   .flowval { font-size: 1.05rem; font-weight: 650; font-variant-numeric: tabular-nums; }
   .flowunit { color: var(--muted); font-size: 0.72rem; font-weight: 400; }
+  .tempval { display: block; color: var(--temp); font-size: 0.78rem; font-weight: 500; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .status { font-size: 0.78rem; }
   .status.ok { color: var(--good); }
   .status.loading { color: var(--warn); }
@@ -83,6 +85,11 @@
   .gridline { stroke: var(--border); stroke-dasharray: 2 3; opacity: 0.5; }
   .flowline { fill: none; stroke: var(--accent); stroke-width: 2; }
   .flowarea { fill: var(--accent); opacity: 0.10; }
+  .templine { fill: none; stroke: var(--temp); stroke-width: 2; stroke-dasharray: 5 3; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; font-size: 0.74rem; color: var(--muted); }
+  .legend .swatch { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+  .legend .swatch.flow { background: var(--accent); }
+  .legend .swatch.temp { background: var(--temp); }
   .dot { fill: var(--accent); }
   .footer { color: var(--muted); font-size: 0.75rem; margin-top: 28px; line-height: 1.6; }
   .footer a { color: var(--accent); }
@@ -130,22 +137,43 @@ const RIVERS = [
   { id: "upper-deerfield", name: "Upper Deerfield (Fife Brook)", meta: "Deerfield River · Florida, MA", type: "history" },
   { id: "dryway",          name: "Dryway (Deerfield #5)",        meta: "Deerfield River · Monroe Bridge, MA", type: "history" },
   { id: "hoosic",          name: "Hoosic River",                meta: "USGS 01332500 · Williamstown, MA", type: "usgs", sites: ["01332500"] },
-  { id: "farmington",      name: "Farmington River",            meta: "USGS 01186000 + 01186500 (Still R.) · CT", type: "usgs", sites: ["01186000", "01186500"] }
+  { id: "farmington",      name: "Farmington River",            meta: "USGS 01186000 + 01186500 (Still R.) · CT", type: "usgs", sites: ["01186000", "01186500"], tempSite: "01186000" }
 ];
 
 // ---- Fetching --------------------------------------------------------------
-async function fetchUSGS(sites) {
+async function fetchUSGS(sites, tempSite) {
+  // Request discharge (00060) for all sites, plus water temperature (00010)
+  // which only exists at tempSite (if given). Temperature is per-location, so
+  // it is NOT summed — it is read from tempSite alone and converted C -> F.
+  const params = tempSite ? "00060,00010" : "00060";
   const url = `https://waterservices.usgs.gov/nwis/iv/?sites=${sites.join(",")}` +
-              `&parameterCd=00060&period=P7D&format=json&siteStatus=all`;
+              `&parameterCd=${params}&period=P7D&format=json&siteStatus=all`;
   const res = await fetch(url);
   if (!res.ok) throw new Error("USGS HTTP " + res.status);
   const data = await res.json();
   const ts = data?.value?.timeSeries || [];
   if (!ts.length) throw new Error("No timeseries");
 
-  const sums = new Map();
+  const sums = new Map();   // discharge sum, keyed by timestamp
+  const temps = [];         // temperature points (Fahrenheit) from tempSite
   for (const series of ts) {
+    // name looks like "USGS:01186000:00060:00000"
+    const parts = (series?.name || "").split(":");
+    const siteNo = parts[1], paramCd = parts[2];
     const vals = series?.values?.[0]?.value || [];
+
+    if (paramCd === "00010") {
+      if (tempSite && siteNo === tempSite) {
+        for (const pt of vals) {
+          const c = parseFloat(pt.value);
+          if (isNaN(c) || c <= -999999) continue;
+          temps.push({ t: new Date(pt.dateTime), v: c * 9 / 5 + 32 });
+        }
+      }
+      continue;   // never sum temperature into discharge
+    }
+
+    // discharge (00060)
     for (const pt of vals) {
       const v = parseFloat(pt.value);
       if (isNaN(v) || v <= -999999) continue;
@@ -158,7 +186,14 @@ async function fetchUSGS(sites) {
   for (const [iso, o] of sums) if (o.n === need) out.push({ t: new Date(iso), v: o.sum });
   out.sort((a, b) => a.t - b.t);
   if (!out.length) throw new Error("No aligned data");
-  return { current: out[out.length - 1].v, series: out };
+  temps.sort((a, b) => a.t - b.t);
+
+  return {
+    current: out[out.length - 1].v,
+    series: out,
+    tempSeries: temps.length ? temps : null,
+    currentTemp: temps.length ? temps[temps.length - 1].v : null
+  };
 }
 
 async function fetchHistory(id) {
@@ -184,7 +219,7 @@ function buildRows() {
     tr.dataset.id = r.id;
     tr.innerHTML = `
       <td><div class="rivername">${r.name}</div><div class="rivermeta">${r.meta}</div></td>
-      <td class="num"><span class="flowval" id="val-${r.id}">—</span> <span class="flowunit">CFS</span></td>
+      <td class="num"><span class="flowval" id="val-${r.id}">—</span> <span class="flowunit">CFS</span><span class="tempval" id="temp-${r.id}"></span></td>
       <td><span class="status loading" id="st-${r.id}">loading…</span></td>
       <td><span class="chev">›</span></td>`;
     const detailTr = document.createElement("tr");
@@ -204,17 +239,25 @@ const fmt = n => n == null ? "—" : n.toLocaleString(undefined, { maximumFracti
 async function loadRiver(r) {
   setStatus(r.id, "loading", "loading…");
   try {
-    const { current, series } = r.type === "usgs"
-      ? await fetchUSGS(r.sites)
+    const result = r.type === "usgs"
+      ? await fetchUSGS(r.sites, r.tempSite)
       : await fetchHistory(r.id);
-    r._current = current; r._series = series;
-    document.getElementById("val-" + r.id).textContent = fmt(current);
-    const last = series[series.length - 1].t;
+    r._current = result.current; r._series = result.series;
+    r._tempSeries = result.tempSeries || null;
+    r._currentTemp = (result.currentTemp != null) ? result.currentTemp : null;
+    document.getElementById("val-" + r.id).textContent = fmt(result.current);
+    const tempEl = document.getElementById("temp-" + r.id);
+    if (tempEl) {
+      tempEl.textContent = r._currentTemp != null
+        ? Math.round(r._currentTemp) + "°F"
+        : "";
+    }
+    const last = result.series[result.series.length - 1].t;
     setStatus(r.id, "ok", "as of " + last.toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }));
   } catch (e) {
     document.getElementById("val-" + r.id).textContent = "—";
     setStatus(r.id, "err", r.type === "history" ? "no data yet" : "unavailable");
-    r._error = e.message; r._series = null;
+    r._error = e.message; r._series = null; r._tempSeries = null;
   }
   const d = document.getElementById("detail-" + r.id);
   if (d && !d.classList.contains("hidden")) renderDetail(r, d);
@@ -242,32 +285,68 @@ function renderDetail(r, container) {
   const note = r.type === "history" && span < 6 * 24 * 3600 * 1000
     ? `<div class="note">History is still filling in. Once the scheduled job has run for a week, this will show a full 7-day record.</div>`
     : "";
+  const hasTemp = Array.isArray(r._tempSeries) && r._tempSeries.length > 0;
+  const title = hasTemp
+    ? `${r.name} — flow &amp; water temp over the prior week`
+    : `${r.name} — flow over the prior week (CFS)`;
+  const legend = hasTemp
+    ? `<div class="legend">
+         <span><i class="swatch flow"></i>Flow (CFS, left)</span>
+         <span><i class="swatch temp"></i>Water temp at Riverton (°F, right)</span>
+       </div>`
+    : "";
   container.innerHTML =
     `<div class="chartbox">
-       <div class="charttitle">${r.name} — flow over the prior week (CFS)</div>
-       ${note}${lineChart(series)}
+       <div class="charttitle">${title}</div>
+       ${note}${lineChart(series, r._tempSeries)}${legend}
      </div>`;
 }
 
 // ---- Dependency-free SVG line chart ----------------------------------------
-function lineChart(series) {
-  const W = 900, H = 260, m = { t: 14, r: 16, b: 28, l: 52 };
+// tempSeries (optional): array of {t, v} in Fahrenheit, drawn on a right axis.
+function lineChart(series, tempSeries) {
+  const hasTemp = Array.isArray(tempSeries) && tempSeries.length > 0;
+  const W = 900, H = 260, m = { t: 14, r: hasTemp ? 52 : 16, b: 28, l: 52 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
   const xs = series.map(d => d.t.getTime()), ys = series.map(d => d.v);
   let xMin = Math.min(...xs), xMax = Math.max(...xs);
   let yMin = Math.min(...ys), yMax = Math.max(...ys);
+  if (hasTemp) {  // align x-range across both series
+    const txs = tempSeries.map(d => d.t.getTime());
+    xMin = Math.min(xMin, ...txs); xMax = Math.max(xMax, ...txs);
+  }
   if (xMin === xMax) { xMin -= 1; xMax += 1; }
   if (yMin === yMax) { yMin = Math.max(0, yMin - 1); yMax += 1; }
   yMin = Math.min(yMin, yMin * 0.95); yMax = yMax * 1.05;
   const X = t => m.l + (t - xMin) / (xMax - xMin) * iw;
   const Y = v => m.t + ih - (v - yMin) / (yMax - yMin) * ih;
 
+  // left axis (flow) gridlines + labels
   const yparts = [];
   for (let i = 0; i <= 4; i++) {
     const v = yMin + (yMax - yMin) * i / 4, y = Y(v);
     yparts.push(`<line class="gridline" x1="${m.l}" y1="${y}" x2="${W - m.r}" y2="${y}"/>`);
     yparts.push(`<text x="${m.l - 8}" y="${y + 3}" text-anchor="end" fill="#8b9aa7" font-size="10">${Math.round(v).toLocaleString()}</text>`);
   }
+
+  // temperature scale + right axis labels
+  let tempParts = "";
+  if (hasTemp) {
+    const tvs = tempSeries.map(d => d.v);
+    let tMin = Math.min(...tvs), tMax = Math.max(...tvs);
+    if (tMin === tMax) { tMin -= 1; tMax += 1; }
+    const pad = (tMax - tMin) * 0.15 || 1;
+    tMin -= pad; tMax += pad;
+    const TY = v => m.t + ih - (v - tMin) / (tMax - tMin) * ih;
+    const rlabels = [];
+    for (let i = 0; i <= 4; i++) {
+      const v = tMin + (tMax - tMin) * i / 4, y = TY(v);
+      rlabels.push(`<text x="${W - m.r + 8}" y="${y + 3}" text-anchor="start" fill="var(--temp)" font-size="10">${Math.round(v)}°F</text>`);
+    }
+    const tPts = tempSeries.map(d => `${X(d.t.getTime())},${TY(d.v)}`).join(" ");
+    tempParts = rlabels.join("") + `<polyline class="templine" points="${tPts}"/>`;
+  }
+
   const xticks = Math.min(5, series.length), xparts = [];
   for (let i = 0; i < xticks; i++) {
     const idx = Math.round(i * (series.length - 1) / Math.max(1, xticks - 1));
@@ -284,7 +363,7 @@ function lineChart(series) {
 
   return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img">
     ${yparts.join("")}<polygon class="flowarea" points="${areaPts}"/>
-    <polyline class="flowline" points="${linePts}"/>${dots}${xparts.join("")}</svg>`;
+    <polyline class="flowline" points="${linePts}"/>${dots}${tempParts}${xparts.join("")}</svg>`;
 }
 
 // ---- Init ------------------------------------------------------------------
