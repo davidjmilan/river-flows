@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>New England River Flows</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2129;
+    --panel-2: #222c37;
+    --border: #2d3a47;
+    --text: #e6edf3;
+    --muted: #8b9aa7;
+    --accent: #4fb3d9;
+    --accent-dim: #2a6f8a;
+    --good: #5fd38d;
+    --warn: #e0b341;
+    --bad: #e06c5e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  header { padding: 24px 20px 12px; max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; font-weight: 650; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 0.85rem; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px 60px; }
+  .controls { display: flex; align-items: center; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
+  button.refresh {
+    background: var(--accent-dim); color: var(--text);
+    border: 1px solid var(--accent); border-radius: 8px;
+    padding: 8px 16px; font-size: 0.85rem; cursor: pointer; transition: background 0.15s;
+  }
+  button.refresh:hover { background: var(--accent); }
+  button.refresh:disabled { opacity: 0.5; cursor: default; }
+  .updated { color: var(--muted); font-size: 0.8rem; }
+
+  table {
+    width: 100%; border-collapse: collapse; background: var(--panel);
+    border-radius: 12px; overflow: hidden; border: 1px solid var(--border);
+  }
+  thead th {
+    text-align: left; font-size: 0.72rem; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--muted); padding: 12px 16px;
+    border-bottom: 1px solid var(--border); font-weight: 600;
+  }
+  thead th.num, tbody td.num { text-align: right; }
+  tbody tr { border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.12s; }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--panel-2); }
+  tbody tr.open { background: var(--panel-2); }
+  tbody td { padding: 14px 16px; vertical-align: middle; }
+  .rivername { font-weight: 600; font-size: 0.98rem; }
+  .rivermeta { color: var(--muted); font-size: 0.76rem; margin-top: 2px; }
+  .flowval { font-size: 1.05rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .flowunit { color: var(--muted); font-size: 0.72rem; font-weight: 400; }
+  .status { font-size: 0.78rem; }
+  .status.ok { color: var(--good); }
+  .status.loading { color: var(--warn); }
+  .status.err { color: var(--bad); }
+  .chev { color: var(--muted); font-size: 0.8rem; transition: transform 0.15s; display: inline-block; }
+  tr.open .chev { transform: rotate(90deg); }
+
+  tr.detailrow { cursor: default; }
+  tr.detailrow:hover { background: var(--panel); }
+  tr.detailrow td { padding: 0; }
+  .detail { padding: 8px 16px 20px; background: var(--panel); }
+  .detail.hidden { display: none; }
+  .chartbox { background: var(--bg); border-radius: 10px; padding: 14px; border: 1px solid var(--border); }
+  .charttitle { font-size: 0.8rem; color: var(--muted); margin-bottom: 8px; }
+  .note {
+    font-size: 0.76rem; color: var(--muted);
+    background: rgba(79,179,217,0.06); border: 1px solid rgba(79,179,217,0.2);
+    border-radius: 8px; padding: 8px 10px; margin-bottom: 10px;
+  }
+  svg { display: block; width: 100%; height: auto; }
+  .gridline { stroke: var(--border); stroke-dasharray: 2 3; opacity: 0.5; }
+  .flowline { fill: none; stroke: var(--accent); stroke-width: 2; }
+  .flowarea { fill: var(--accent); opacity: 0.10; }
+  .dot { fill: var(--accent); }
+  .footer { color: var(--muted); font-size: 0.75rem; margin-top: 28px; line-height: 1.6; }
+  .footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>New England River Flows</h1>
+  <div class="sub">Current discharge (CFS) for paddling rivers in MA &amp; CT. Tap a river name for its weekly graph.</div>
+</header>
+
+<div class="wrap">
+  <div class="controls">
+    <button class="refresh" id="refreshBtn">Refresh all</button>
+    <span class="updated" id="updatedAt"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>River</th><th class="num">Flow</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody id="riverBody"></tbody>
+  </table>
+
+  <div class="footer">
+    <p><strong>Data sources.</strong> Hoosic, Farmington (Rainbow gage), and Still River are pulled live from the
+    <a href="https://waterservices.usgs.gov/" target="_blank" rel="noopener">USGS Water Services API</a>.
+    The Farmington figure is the sum of the Farmington gage (01186000) and the Still River gage (01186500).</p>
+    <p>The <strong>Upper Deerfield (Fife Brook)</strong> and <strong>Dryway</strong> sections have no public API or
+    historical feed — their sources publish only a single current value. A scheduled GitHub Action scrapes those
+    values every couple of hours and stores them in this repository, so their graphs are a genuine rolling history
+    that fills in over the first week after deployment.</p>
+  </div>
+</div>
+
+<script>
+// ---- Config ----------------------------------------------------------------
+// History files written by the GitHub Action. Relative paths work on GitHub Pages.
+const DATA = {
+  "upper-deerfield": "data/upper-deerfield.json",
+  "dryway":          "data/dryway.json"
+};
+
+const RIVERS = [
+  { id: "upper-deerfield", name: "Upper Deerfield (Fife Brook)", meta: "Deerfield River · Florida, MA", type: "history" },
+  { id: "dryway",          name: "Dryway (Deerfield #5)",        meta: "Deerfield River · Monroe Bridge, MA", type: "history" },
+  { id: "hoosic",          name: "Hoosic River",                meta: "USGS 01332500 · Williamstown, MA", type: "usgs", sites: ["01332500"] },
+  { id: "farmington",      name: "Farmington River",            meta: "USGS 01186000 + 01186500 (Still R.) · CT", type: "usgs", sites: ["01186000", "01186500"] }
+];
+
+// ---- Fetching --------------------------------------------------------------
+async function fetchUSGS(sites) {
+  const url = `https://waterservices.usgs.gov/nwis/iv/?sites=${sites.join(",")}` +
+              `&parameterCd=00060&period=P7D&format=json&siteStatus=all`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("USGS HTTP " + res.status);
+  const data = await res.json();
+  const ts = data?.value?.timeSeries || [];
+  if (!ts.length) throw new Error("No timeseries");
+
+  const sums = new Map();
+  for (const series of ts) {
+    const vals = series?.values?.[0]?.value || [];
+    for (const pt of vals) {
+      const v = parseFloat(pt.value);
+      if (isNaN(v) || v <= -999999) continue;
+      const cur = sums.get(pt.dateTime) || { sum: 0, n: 0 };
+      cur.sum += v; cur.n += 1;
+      sums.set(pt.dateTime, cur);
+    }
+  }
+  const need = sites.length, out = [];
+  for (const [iso, o] of sums) if (o.n === need) out.push({ t: new Date(iso), v: o.sum });
+  out.sort((a, b) => a.t - b.t);
+  if (!out.length) throw new Error("No aligned data");
+  return { current: out[out.length - 1].v, series: out };
+}
+
+async function fetchHistory(id) {
+  // cache-bust so we always see the latest committed data
+  const res = await fetch(DATA[id] + "?t=" + Date.now());
+  if (!res.ok) throw new Error("History HTTP " + res.status);
+  const raw = await res.json();
+  const series = (Array.isArray(raw) ? raw : [])
+    .map(p => ({ t: new Date(p.t), v: Number(p.v) }))
+    .filter(p => !isNaN(p.t) && !isNaN(p.v))
+    .sort((a, b) => a.t - b.t);
+  if (!series.length) throw new Error("No readings yet");
+  return { current: series[series.length - 1].v, series };
+}
+
+// ---- Rendering -------------------------------------------------------------
+const tbody = document.getElementById("riverBody");
+
+function buildRows() {
+  tbody.innerHTML = "";
+  for (const r of RIVERS) {
+    const tr = document.createElement("tr");
+    tr.dataset.id = r.id;
+    tr.innerHTML = `
+      <td><div class="rivername">${r.name}</div><div class="rivermeta">${r.meta}</div></td>
+      <td class="num"><span class="flowval" id="val-${r.id}">—</span> <span class="flowunit">CFS</span></td>
+      <td><span class="status loading" id="st-${r.id}">loading…</span></td>
+      <td><span class="chev">›</span></td>`;
+    const detailTr = document.createElement("tr");
+    detailTr.className = "detailrow";
+    detailTr.innerHTML = `<td colspan="4"><div class="detail hidden" id="detail-${r.id}"></div></td>`;
+    tr.addEventListener("click", () => toggleDetail(r, tr));
+    tbody.appendChild(tr); tbody.appendChild(detailTr);
+  }
+}
+
+function setStatus(id, cls, txt) {
+  const el = document.getElementById("st-" + id);
+  el.className = "status " + cls; el.textContent = txt;
+}
+const fmt = n => n == null ? "—" : n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+
+async function loadRiver(r) {
+  setStatus(r.id, "loading", "loading…");
+  try {
+    const { current, series } = r.type === "usgs"
+      ? await fetchUSGS(r.sites)
+      : await fetchHistory(r.id);
+    r._current = current; r._series = series;
+    document.getElementById("val-" + r.id).textContent = fmt(current);
+    const last = series[series.length - 1].t;
+    setStatus(r.id, "ok", "as of " + last.toLocaleString([], { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }));
+  } catch (e) {
+    document.getElementById("val-" + r.id).textContent = "—";
+    setStatus(r.id, "err", r.type === "history" ? "no data yet" : "unavailable");
+    r._error = e.message; r._series = null;
+  }
+  const d = document.getElementById("detail-" + r.id);
+  if (d && !d.classList.contains("hidden")) renderDetail(r, d);
+}
+
+function toggleDetail(r, tr) {
+  const d = document.getElementById("detail-" + r.id);
+  const isHidden = d.classList.contains("hidden");
+  document.querySelectorAll(".detail").forEach(el => el.classList.add("hidden"));
+  document.querySelectorAll("#riverBody tr").forEach(el => el.classList.remove("open"));
+  if (isHidden) { d.classList.remove("hidden"); tr.classList.add("open"); renderDetail(r, d); }
+}
+
+function renderDetail(r, container) {
+  const series = r._series || [];
+  if (!series.length) {
+    const msg = r.type === "history"
+      ? "No readings recorded yet — the scheduled job will populate this within a few hours of deployment."
+      : "No data to chart" + (r._error ? " — " + r._error : "") + ".";
+    container.innerHTML = `<div class="chartbox"><div class="charttitle">${r.name}</div>
+      <div class="status err">${msg}</div></div>`;
+    return;
+  }
+  const span = series[series.length - 1].t - series[0].t;
+  const note = r.type === "history" && span < 6 * 24 * 3600 * 1000
+    ? `<div class="note">History is still filling in. Once the scheduled job has run for a week, this will show a full 7-day record.</div>`
+    : "";
+  container.innerHTML =
+    `<div class="chartbox">
+       <div class="charttitle">${r.name} — flow over the prior week (CFS)</div>
+       ${note}${lineChart(series)}
+     </div>`;
+}
+
+// ---- Dependency-free SVG line chart ----------------------------------------
+function lineChart(series) {
+  const W = 900, H = 260, m = { t: 14, r: 16, b: 28, l: 52 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const xs = series.map(d => d.t.getTime()), ys = series.map(d => d.v);
+  let xMin = Math.min(...xs), xMax = Math.max(...xs);
+  let yMin = Math.min(...ys), yMax = Math.max(...ys);
+  if (xMin === xMax) { xMin -= 1; xMax += 1; }
+  if (yMin === yMax) { yMin = Math.max(0, yMin - 1); yMax += 1; }
+  yMin = Math.min(yMin, yMin * 0.95); yMax = yMax * 1.05;
+  const X = t => m.l + (t - xMin) / (xMax - xMin) * iw;
+  const Y = v => m.t + ih - (v - yMin) / (yMax - yMin) * ih;
+
+  const yparts = [];
+  for (let i = 0; i <= 4; i++) {
+    const v = yMin + (yMax - yMin) * i / 4, y = Y(v);
+    yparts.push(`<line class="gridline" x1="${m.l}" y1="${y}" x2="${W - m.r}" y2="${y}"/>`);
+    yparts.push(`<text x="${m.l - 8}" y="${y + 3}" text-anchor="end" fill="#8b9aa7" font-size="10">${Math.round(v).toLocaleString()}</text>`);
+  }
+  const xticks = Math.min(5, series.length), xparts = [];
+  for (let i = 0; i < xticks; i++) {
+    const idx = Math.round(i * (series.length - 1) / Math.max(1, xticks - 1));
+    const d = series[idx].t, x = X(d.getTime());
+    const lbl = (xMax - xMin) > 2 * 24 * 3600 * 1000
+      ? d.toLocaleDateString([], { month: "numeric", day: "numeric" })
+      : d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    xparts.push(`<text x="${x}" y="${H - 8}" text-anchor="middle" fill="#8b9aa7" font-size="10">${lbl}</text>`);
+  }
+  const linePts = series.map(d => `${X(d.t.getTime())},${Y(d.v)}`).join(" ");
+  const areaPts = `${X(xMin)},${Y(yMin)} ${linePts} ${X(xMax)},${Y(yMin)}`;
+  const dots = series.length <= 60
+    ? series.map(d => `<circle class="dot" cx="${X(d.t.getTime())}" cy="${Y(d.v)}" r="2.5"/>`).join("") : "";
+
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img">
+    ${yparts.join("")}<polygon class="flowarea" points="${areaPts}"/>
+    <polyline class="flowline" points="${linePts}"/>${dots}${xparts.join("")}</svg>`;
+}
+
+// ---- Init ------------------------------------------------------------------
+async function loadAll() {
+  const btn = document.getElementById("refreshBtn");
+  btn.disabled = true;
+  await Promise.allSettled(RIVERS.map(loadRiver));
+  document.getElementById("updatedAt").textContent =
+    "Page refreshed " + new Date().toLocaleString([], { hour: "numeric", minute: "2-digit" });
+  btn.disabled = false;
+}
+document.getElementById("refreshBtn").addEventListener("click", loadAll);
+buildRows();
+loadAll();
+</script>
+</body>
+</html>
